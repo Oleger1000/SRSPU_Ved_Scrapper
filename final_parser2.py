@@ -1,16 +1,15 @@
-
 import re
 import time
 import csv
 import os
-import sys
-import glob
 import asyncio
+from openpyxl import Workbook
 import browser_cookie3
 from urllib.parse import urlparse, urljoin
 
 import requests
 from bs4 import BeautifulSoup
+from playwright.sync_api import sync_playwright
 
 # ---------------- CONFIG ----------------
 BASE = "https://dec.srspu.ru"
@@ -22,7 +21,7 @@ PASSWORD = ""
 
 OUT_DIR = "ved_results"
 HTML_DIR = os.path.join(OUT_DIR, "html")
-CSV_PATH = os.path.join(OUT_DIR, "all_students.csv")
+CSV_PATH = os.path.join(OUT_DIR, "all_students.xlsx")
 
 HEADLESS = True
 REQUESTS_SLEEP = 0.5
@@ -83,34 +82,24 @@ print(f"[+] output -> {OUT_DIR}")
 
 # ---------------- Browser Cookie Loader ----------------
 def get_cookiejar_for_domain(domain: str):
-    """
-    Универсальный сборщик куков из популярных браузеров.
-    Работает даже в exe (PyInstaller) при условии, что запущен под тем же пользователем.
-    Проверяет Firefox, Chrome, Edge, Opera, Yandex и Chromium.
-    """
+    """Пытается получить cookiejar из популярных локальных браузеров."""
     browsers = [
-        ("firefox", browser_cookie3.firefox),
         ("chrome", browser_cookie3.chrome),
-        ("edge", browser_cookie3.edge),
-        ("opera", browser_cookie3.opera),
         ("chromium", browser_cookie3.chromium),
+        ("edge", browser_cookie3.edge),
+        ("firefox", browser_cookie3.firefox),
+        ("opera", browser_cookie3.opera),
     ]
-
-    found_any = False
     for name, fn in browsers:
         try:
             cj = fn(domain_name=domain)
-            cookies_list = list(cj)
-            if cookies_list:
-                print(f"[+] Cookies найдены в {name} (кол-во: {len(cookies_list)})")
+            if cj and len(list(cj)) > 0:
+                print(f"[+] Cookies найдены в {name}")
                 return cj
             else:
                 print(f"[-] {name}: куки не найдены")
         except Exception as e:
-            # Некоторые браузеры могут отсутствовать — это нормально
             print(f"[-] {name}: ошибка при чтении куков ({e})")
-        found_any = True
-
     print("[!] Куки не найдены ни в одном браузере.")
     return None
 
@@ -121,33 +110,6 @@ def inject_cookiejar_into_session(session, cj, domain: str):
         if domain in cookie.domain:
             session.cookies.set(cookie.name, cookie.value, domain=cookie.domain, path=cookie.path)
     print("[+] Куки из браузера подставлены в requests.Session()")
-
-
-def fetch_cookies_from_cookie_server(api_url: str, api_key: str, login: str, password: str):
-    """Запрашивает cookies у удалённого cookie-server."""
-    url = api_url.rstrip("/") + "/get_cookies"
-    headers = {"X-API-Key": api_key}
-    payload = {"login": login, "password": password}
-    try:
-        r = requests.post(url, json=payload, headers=headers, timeout=60)
-        r.raise_for_status()
-        j = r.json()
-        return j.get("cookies", [])
-    except Exception as e:
-        print(f"[-] Ошибка при запросе к cookie-server: {e}")
-        return None
-
-
-def transfer_cookies_from_playwright_format(session: requests.Session, cookies: list):
-    """Подставляем Playwright куки в requests.Session."""
-    for c in cookies:
-        name = c.get("name")
-        value = c.get("value")
-        if not name or value is None:
-            continue
-        # Игнорируем domain, path, secure для простоты
-        session.cookies.set(name, value, domain="dec.srspu.ru", path="/", secure=False)
-    print("[+] Cookies подставлены в requests.Session()")
 
 
 # ---------------- Requests Session ----------------
@@ -247,22 +209,13 @@ def main():
     s = requests.Session()
 
     # 1) Пытаемся достать куки из браузера
-        # попробуем локально
     cj = get_cookiejar_for_domain("dec.srspu.ru")
     if cj:
         inject_cookiejar_into_session(s, cj, "dec.srspu.ru")
-    else:
-        # если локально не нашлось — запросим у удалённого сервиса Playwright
-        API_URL = "http://89.169.12.12:63592"   # <- адрес твоего cookie-server
-        API_KEY = "transfer_train_never_been_located"
-        login = LOGIN or input("Login: ").strip()
-        password = PASSWORD or __import__("getpass").getpass("Password: ")
-        pw_cookies = fetch_cookies_from_cookie_server(API_URL, API_KEY, login, password, domain="dec.srspu.ru")
-        if pw_cookies:
-            transfer_cookies_from_playwright_format(s, pw_cookies)
-        else:
-            print("[!] Не удалось получить cookies ни локально, ни с cookie-server.")
-            return
+        test = s.get(DISCIPLINES_URL, allow_redirects=True)
+        if "Login.aspx" in test.url or test.status_code == 401:
+            print("[!] Сессионные куки из браузера невалидны — переходим к логину через Pyppeteer.")
+            cj = None
 
     # 2) Если нет — логинимся через Pyppeteer
     # if not cj:
@@ -312,14 +265,25 @@ def main():
         time.sleep(REQUESTS_SLEEP)
 
     if rows_for_csv:
-        header = ["student_id", "student_name", "discipline", "score"]
-        with open(CSV_PATH, "w", newline="", encoding="utf-8") as csvf:
-            writer = csv.writer(csvf)
-            writer.writerow(header)
-            writer.writerows(rows_for_csv)
-        print(f"[+] CSV сохранён: {CSV_PATH}")
+        xlsx_path = os.path.join(OUT_DIR, "all_students.xlsx")
+
+        wb = Workbook()
+        ws = wb.active
+        ws.append(["student_id", "student_name", "discipline", "score"])
+
+        for row in rows_for_csv:
+            ws.append(row)
+
+        wb.save(xlsx_path)
+        print(f"[+] XLSX сохранён: {xlsx_path}")
+        
     else:
-        print("[!] Нечего сохранять в CSV.")
+        print("[!] Нечего сохранять в XLSX.")
+
+    with open(CSV_PATH, "w", newline="", encoding="utf-8") as csvf:
+        writer = csv.writer(csvf)
+        writer.writerow(header)
+        writer.writerows(rows_for_csv)
 
     print("[*] Готово.")
 

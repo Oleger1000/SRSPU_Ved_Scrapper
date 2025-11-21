@@ -9,8 +9,13 @@ import webbrowser
 from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtGui import QFont, QPixmap, QCursor
 import final_parser2 as vbd
+from openpyxl import load_workbook, Workbook
 import csv
 import os
+
+APP_VERSION = "1.2.0"   # текущая версия программы
+GITHUB_REPO = "Oleger1000/SRSPU_Ved_Scrapper"  # твой репозиторий
+
 
 def resource_path(relative_path):
     """Получаем путь к ресурсам иконок как для dev, так и для PyInstaller"""
@@ -25,11 +30,13 @@ def resource_path(relative_path):
 class VedGUI(QWidget):
     log_signal = pyqtSignal(str)
     progress_signal = pyqtSignal(int)
+    update_available_signal = pyqtSignal(str, str)  # добавляем этот сигнал для версии и URL
 
     def __init__(self):
         super().__init__()
         self.setWindowTitle("VED Scraper")
         self.resize(600, 570)
+        self.update_available_signal.connect(self.show_update_popup)
         self.setFont(QFont("Segoe UI", 10))
 
         # Начальная тема - светлая
@@ -57,8 +64,57 @@ class VedGUI(QWidget):
         self.tab_about = QWidget()
         self.tabs.addTab(self.tab_about, "О программе")
         self.init_about_tab()
+    
+        # Проверяем обновления при запуске
+        threading.Thread(target=self.check_for_updates, daemon=True).start()
+
 
     # ---------- Темы ----------
+
+    def check_for_updates(self):
+        import requests
+
+        url = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
+
+        try:
+            r = requests.get(url, timeout=5)
+            if r.status_code != 200:
+                return
+
+            data = r.json()
+
+            raw_name = data.get("name", "").lstrip("v")
+            latest_tag = raw_name.strip()
+            release_url = data.get("html_url", "")
+
+            def version_tuple(v):
+                return tuple(map(int, v.split("."))) if v else (0,)
+
+            if version_tuple(latest_tag) > version_tuple(APP_VERSION):
+                # ВАЖНО: уведомляем GUI-поток через сигнал
+                self.update_available_signal.emit(latest_tag, release_url)
+
+        except Exception:
+            pass
+
+    
+    def show_update_popup(self, latest_tag, release_url):
+
+        open_msg = QMessageBox(self)
+        open_msg.setWindowTitle("Обновление доступно")
+        open_msg.setText(
+            f"Вышла новая версия: {latest_tag}\n"
+            f"Открыть страницу релизов?"
+        )
+        open_msg.addButton("Открыть GitHub", QMessageBox.AcceptRole)
+        open_msg.addButton("Позже", QMessageBox.RejectRole)
+
+        if open_msg.exec() == QMessageBox.AcceptRole:
+            import webbrowser
+            webbrowser.open(release_url)
+
+
+
 
     def update_icons(self):
         self.telegram_label.setPixmap(
@@ -93,8 +149,8 @@ class VedGUI(QWidget):
                     border-bottom: none;
                     border-top-left-radius: 5px;
                     border-top-right-radius: 5px;
-                    min-height: 32px;
-                    min-width: 100px; 
+                    min-height: 22px;
+                    min-width: 110px; 
                     font-size: 15px;
                 }
                 QTabBar::tab:selected {
@@ -127,8 +183,8 @@ class VedGUI(QWidget):
                     border-bottom: none;
                     border-top-left-radius: 5px;
                     border-top-right-radius: 5px;
-                    min-height: 32px;
-                    min-width: 100px; 
+                    min-height: 22px;
+                    min-width: 110px; 
                     font-size: 15px;
                 }
                 QTabBar::tab:selected {
@@ -183,24 +239,29 @@ class VedGUI(QWidget):
 
     # ---------- Вкладка Замена ФИО ----------
     def autofill_rec_numbers(self):
-        """Автозаполняем поле соответствий номеров зачеток из CSV (только уникальные)."""
-        if not os.path.exists(vbd.CSV_PATH):
-            self.log_signal.emit(f"[!] CSV с оценками не найден: {vbd.CSV_PATH}")
+        """Автозаполняем поле соответствий номеров зачеток из XLSX (уникальные значения)."""
+        xlsx_path = os.path.join(vbd.OUT_DIR, "all_students.xlsx")
+
+        if not os.path.exists(xlsx_path):
+            self.log_signal.emit(f"[!] XLSX с оценками не найден: {xlsx_path}")
             return
 
-        rec_numbers = set()  # используем множество для уникальности
-        with open(vbd.CSV_PATH, newline="", encoding="utf-8") as csvf:
-            reader = csv.DictReader(csvf)
-            for row in reader:
-                rec_numbers.add(row["student_name"])
+        wb = load_workbook(xlsx_path)
+        ws = wb.active
 
-        # сортируем по возрастанию
+        rec_numbers = set()
+
+        for row in ws.iter_rows(min_row=2, values_only=True):
+            student_id, student_name, discipline, score = row
+            if student_name:
+                rec_numbers.add(student_name)
+
         sorted_numbers = sorted(rec_numbers)
 
-        # формируем строки вида "номер, "
         lines = [f"{num}, " for num in sorted_numbers]
         self.fio_input.setPlainText("\n".join(lines))
-        self.log_signal.emit(f"[+] Поле для замены ФИО заполнено {len(lines)} уникальными номерами зачеток")
+        self.log_signal.emit(f"[+] Поле заполнено {len(lines)} номерами зачеток (из XLSX)")
+
 
 
 
@@ -214,7 +275,7 @@ class VedGUI(QWidget):
         layout.addWidget(self.fio_input)
 
         # --- Кнопка замены ---
-        self.replace_button = QPushButton("Заменить на ФИО в CSV")
+        self.replace_button = QPushButton("Заменить на ФИО")
         self.replace_button.clicked.connect(self.replace_ids_with_fio)
         layout.addWidget(self.replace_button)
 
@@ -236,7 +297,7 @@ class VedGUI(QWidget):
         about_text.setReadOnly(True)
         about_text.setHtml("""
             <h2>VED Scraper</h2>
-            <p><b>Версия:</b> 1.1</p>
+            <p><b>Версия:</b> 1.2</p>
             <p><b>Автор:</b> @Oleger12</p>
             <p>Программа для сбора оценок студентов с dec.srspu.ru и замены номеров зачеток на ФИО.</p>
             <p>Инструкция:</p>
@@ -370,11 +431,18 @@ class VedGUI(QWidget):
 
         if rows_for_csv:
             header = ["student_id", "student_name", "discipline", "score"]
-            with open(vbd.CSV_PATH, "w", newline="", encoding="utf-8") as csvf:
-                writer = vbd.csv.writer(csvf)
-                writer.writerow(header)
-                writer.writerows(rows_for_csv)
-            self.log_signal.emit(f"[+] CSV сохранён: {vbd.CSV_PATH}")
+            xlsx_path = os.path.join(vbd.OUT_DIR, "all_students.xlsx")
+
+            wb = Workbook()
+            ws = wb.active
+            ws.append(["student_id", "student_name", "discipline", "score"])
+
+            for row in rows_for_csv:
+                ws.append(row)
+
+            wb.save(xlsx_path)
+            self.log_signal.emit(f"[+] XLSX сохранён: {xlsx_path}")
+
         else:
             self.log_signal.emit("[!] Нечего сохранять в CSV.")
 
@@ -428,6 +496,7 @@ class VedGUI(QWidget):
         if not text:
             QMessageBox.warning(self, "Ошибка", "Введите соответствия номеров зачеток и ФИО")
             return
+
         mapping = {}
         for line in text.splitlines():
             parts = line.split(",", 1)
@@ -436,30 +505,44 @@ class VedGUI(QWidget):
                 continue
             rec_number, full_name = parts[0].strip(), parts[1].strip()
             mapping[rec_number] = full_name
-        if not os.path.exists(vbd.CSV_PATH):
-            QMessageBox.warning(self, "Ошибка", f"CSV-файл с оценками не найден: {vbd.CSV_PATH}")
+
+        xlsx_path = os.path.join(vbd.OUT_DIR, "all_students.xlsx")
+        if not os.path.exists(xlsx_path):
+            QMessageBox.warning(self, "Ошибка", f"XLSX-файл с оценками не найден: {xlsx_path}")
             return
-        new_rows = []
+
+        wb = load_workbook(xlsx_path)
+        ws = wb.active
+
         not_found = set()
-        with open(vbd.CSV_PATH, newline="", encoding="utf-8") as csvf:
-            reader = csv.DictReader(csvf)
-            header = reader.fieldnames
-            for row in reader:
-                rec = row["student_name"]
-                if rec in mapping:
-                    row["student_name"] = mapping[rec]
-                else:
-                    not_found.add(rec)
-                new_rows.append(row)
-        new_csv = os.path.join(vbd.OUT_DIR, "all_students_with_names.csv")
-        with open(new_csv, "w", newline="", encoding="utf-8") as csvf:
-            writer = csv.DictWriter(csvf, fieldnames=header)
-            writer.writeheader()
-            writer.writerows(new_rows)
-        self.log(f"[+] Замена выполнена. Новый CSV сохранён: {new_csv}")
+
+        # Делаем копию как новый файл
+        new_xlsx = os.path.join(vbd.OUT_DIR, "all_students_with_names.xlsx")
+        new_wb = Workbook()
+        new_ws = new_wb.active
+
+        # Переносим заголовок
+        header = ["student_id", "student_name", "discipline", "score"]
+        new_ws.append(header)
+
+        for row in ws.iter_rows(min_row=2, values_only=True):
+            student_id, student_name, discipline, score = row
+            if student_name in mapping:
+                student_name = mapping[student_name]
+            else:
+                not_found.add(student_name)
+
+            new_ws.append([student_id, student_name, discipline, score])
+
+        new_wb.save(new_xlsx)
+
+        self.log(f"[+] Замена выполнена. Новый XLSX сохранён: {new_xlsx}")
+
         if not_found:
-            self.log(f"[!] Следующие номера зачеток не найдены в соответствиях: {', '.join(not_found)}")
-        QMessageBox.information(self, "Готово", f"Новый CSV сохранён:\n{new_csv}")
+            self.log(f"[!] Не найдены соответствия для: {', '.join(not_found)}")
+
+        QMessageBox.information(self, "Готово", f"Новый XLSX сохранён:\n{new_xlsx}")
+    
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
