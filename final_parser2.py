@@ -112,6 +112,33 @@ def inject_cookiejar_into_session(session, cj, domain: str):
     print("[+] Куки из браузера подставлены в requests.Session()")
 
 
+def fetch_cookies_from_cookie_server(api_url: str, api_key: str, login: str, password: str):
+    """Запрашивает cookies у удалённого cookie-server."""
+    url = api_url.rstrip("/") + "/get_cookies"
+    headers = {"X-API-Key": api_key}
+    payload = {"login": login, "password": password}
+    try:
+        r = requests.post(url, json=payload, headers=headers, timeout=60)
+        r.raise_for_status()
+        j = r.json()
+        return j.get("cookies", [])
+    except Exception as e:
+        print(f"[-] Ошибка при запросе к cookie-server: {e}")
+        return None
+
+
+def transfer_cookies_from_playwright_format(session: requests.Session, cookies: list):
+    """Подставляем Playwright куки в requests.Session."""
+    for c in cookies:
+        name = c.get("name")
+        value = c.get("value")
+        if not name or value is None:
+            continue
+        # Игнорируем domain, path, secure для простоты
+        session.cookies.set(name, value, domain="dec.srspu.ru", path="/", secure=False)
+    print("[+] Cookies подставлены в requests.Session()")
+
+
 # ---------------- Requests Session ----------------
 def transfer_cookies_to_requests(session, cookies):
     for c in cookies:
@@ -212,10 +239,16 @@ def main():
     cj = get_cookiejar_for_domain("dec.srspu.ru")
     if cj:
         inject_cookiejar_into_session(s, cj, "dec.srspu.ru")
-        test = s.get(DISCIPLINES_URL, allow_redirects=True)
-        if "Login.aspx" in test.url or test.status_code == 401:
-            print("[!] Сессионные куки из браузера невалидны — переходим к логину через Pyppeteer.")
-            cj = None
+    else:
+        # если локально не нашлось — запросим у удалённого сервиса Playwright
+        API_URL = "http://89.169.12.12:63592"   # <- адрес твоего cookie-server
+        API_KEY = "transfer_train_never_been_located"
+        pw_cookies = fetch_cookies_from_cookie_server(API_URL, API_KEY, login, password)
+        if pw_cookies:
+            transfer_cookies_from_playwright_format(s, pw_cookies)
+        else:
+            print("[!] Не удалось получить cookies ни локально, ни с cookie-server.")
+            return
 
     # 2) Если нет — логинимся через Pyppeteer
     # if not cj:
